@@ -14,6 +14,8 @@
 #include <dune/grid/yaspgrid.hh>
 #include <dune/istl/bcrsmatrix.hh>
 #include <dune/istl/matrixindexset.hh>
+#include <dune/functions/functionspacebases/lagrangebasis.hh>
+#include <dune/functions/functionspacebases/interpolate.hh>
 
 // Global typedefs
 typedef std::vector<uint> Colors;
@@ -188,27 +190,64 @@ int main(int argc, char** argv)
 {
   // Init
   //-----------------------------------------------------------------------
-  // init grid
+  // init main consts
   const int dim = 2;
+  // init main typedefs
+  typedef Dune::YaspGrid<dim>       Grid;
+  typedef Grid::LeafGridView        GridView;
+  typedef Topology<GridView>        Topology;
+  typedef Dune::BCRSMatrix<double>  Matrix;
+  typedef Dune::BlockVector<double> Vector;
+  // init grid
   Dune::FieldVector<double,dim> len; for (auto& l : len) l=1.0;
   std::array<int,dim> cells; for (auto& c : cells) c=4;
-  Dune::YaspGrid<dim> grid(len,cells);
-  auto gv = grid.leafGridView();
-  // init Poisson Equation problem:
+  Grid grid(len,cells);
+  grid.globalRefine(2);
+  GridView gv = grid.leafGridView();
+  // init FEM 1
+  // Poisson Equation problem:
   // - \Delta u = -5 on (0,1)^2 \ [0.5,1)^2 with
-  //  u = 0   on {0}x[0,1] \cup [0,1]x{0}
-  //  u = 0.5 on {0.5}x[0.5,1] \cup [0.5,1]x{0.5}
-  //  u' = 0  otherwise
-  // Init FEM 1
-  // TODO
+  //   u = 0   on {0}x[0,1] \cup [0,1]x{0}
+  //   u = 0.5 on {0.5}x[0.5,1] \cup [0.5,1]x{0.5}
+  //   u' = 0  otherwise
+  Functions::LagrangeBasis<GridView,1> basis(gridView);
+  // FEM1 -- init Stiffness Matrix
+  Matrix stiffnessMatrix1;
+  for (size_t i=0; i<stiffnessMatrix.N(); i++){
+    if (!dirichletNodes[i]) continue;
+    auto cIt    = stiffnessMatrix[i].begin();
+    auto cEndIt = stiffnessMatrix[i].end();
+    for (; cIt!=cEndIt; ++cIt)
+      *cIt = (cIt.index()==i) ? 1.0 : 0.0;
+  }
+  // FEM1 -- init Dirichlet values
+  Vector b1;
+  auto dirichletValues = [](auto x)
+  { return (x[0]< 1e-8 || x[1] < 1e-8) ? 0 : 0.5; };
+  Functions::interpolate(basis, b, dirichletValues);
+  // init solution vector
+  Vector x1(basis.size());
+  x1 = b1;
+  // init linear operator
+  MatrixAdapter<Matrix,Vector,Vector> linearOperator(stiffnessMatrix);
+  // init ILU
+  SeqILU<Matrix,Vector,Vector> preconditioner(stiffnessMatrix, 1.0);
+  // init conjugate gradient solver
+  CGSolver<Vector> cg(linearOperator, preconditioner,
+                      1e-5, // Desired residual reduction factor
+                      50,   // Maximum number of iterations
+                      2);   // Verbosity of the solver
+  // init solving statistics object
+  InverseOperatorResult statistics1;
+  // init FEM 2
   // FEM 2
-  // Init FEM 2
   // TODO
   //-----------------------------------------------------------------------
   // end Init
   
   // Perform GC
-  TIME(Colors clrs = gc_greedy(grid))
+  TIME(Topology topology = Topology(gv, BOTH));
+  TIME(Colors clrs = gc_greedy(grid));
   // TODO TIME(Colors clrs = gc_???(grid))
 
   // Perform common FEM evaluation
