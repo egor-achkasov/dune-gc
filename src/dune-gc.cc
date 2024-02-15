@@ -14,6 +14,9 @@
 #include <dune/grid/yaspgrid.hh>
 #include <dune/istl/bcrsmatrix.hh>
 #include <dune/istl/matrixindexset.hh>
+#include <dune/istl/operators.hh> // for MatrixAdapter
+#include <dune/istl/preconditioners.hh> // for SeqILU
+#include <dune/istl/solvers.hh> // for CGSolver
 #include <dune/functions/functionspacebases/lagrangebasis.hh>
 #include <dune/functions/functionspacebases/interpolate.hh>
 
@@ -36,7 +39,7 @@ public:
   typedef GridView::IndexSet::IndexType IndexType;
 
   /// O(gv.size(0))
-  Topology(const GridView& gv, const DOF_LOC df)
+  Topology(const DOF_LOC df, const Basis& b)
   {
     // Init
     e2dof.reserve(gv.size(0));
@@ -53,7 +56,7 @@ public:
   }
 
   std::unordered_map<IndexType, IndexType> e2dof;
-  std::unordered_map<IndexType, IndexType> e2dof;
+  std::unordered_map<IndexType, IndexType> dof2e;
 };
 
 /** Greedy 2D graph coloring. https://doi.org/10.1145/3458744.3473362
@@ -121,7 +124,7 @@ Colors gc_greedy(const GridView& gv)
 //=========================================================================
 
 using CHRONO_CLOCK = std::chrono::high_resolution_clock;
-#define CHRONO_DURCAST_MILS std::chrono::duration_cast<std::chrono::milliseconds>;
+#define CHRONO_DURCAST_MILS std::chrono::duration_cast<std::chrono::milliseconds>
 static CHRONO_CLOCK::time_point g_chrono_tp1;
 static int64_t g_chrono_dur_mils;
 /// Measures and prints execution time of a function call
@@ -189,7 +192,7 @@ assemblePoissonProblem(
 int main(int argc, char** argv)
 {
   // Init
-  //-----------------------------------------------------------------------
+  //=======================================================================
   // init main consts
   const int dim = 2;
   // init main typedefs
@@ -205,58 +208,71 @@ int main(int argc, char** argv)
   grid.globalRefine(2);
   GridView gv = grid.leafGridView();
   // init FEM 1
+  //-----------------------------------------------------------------------
   // Poisson Equation problem:
   // - \Delta u = -5 on (0,1)^2 \ [0.5,1)^2 with
   //   u = 0   on {0}x[0,1] \cup [0,1]x{0}
   //   u = 0.5 on {0.5}x[0.5,1] \cup [0.5,1]x{0.5}
   //   u' = 0  otherwise
-  Functions::LagrangeBasis<GridView,1> basis(gridView);
+  Dune::Functions::LagrangeBasis<GridView,1> basis(gv);
+  std::vector<bool> dirichletNodes;
+  auto predicate = [](auto x)
+  {
+    return x[0] < 1e-8
+        || x[1] < 1e-8
+        || (x[0] > 0.4999 && x[1] > 0.4999);
+  };
+  Dune::Functions::interpolate(basis, dirichletNodes, predicate);
   // FEM1 -- init Stiffness Matrix
   Matrix stiffnessMatrix1;
-  for (size_t i=0; i<stiffnessMatrix.N(); i++){
+  for (size_t i=0; i<stiffnessMatrix1.N(); i++){
     if (!dirichletNodes[i]) continue;
-    auto cIt    = stiffnessMatrix[i].begin();
-    auto cEndIt = stiffnessMatrix[i].end();
+    auto cIt    = stiffnessMatrix1[i].begin();
+    auto cEndIt = stiffnessMatrix1[i].end();
     for (; cIt!=cEndIt; ++cIt)
       *cIt = (cIt.index()==i) ? 1.0 : 0.0;
   }
   // FEM1 -- init Dirichlet values
   Vector b1;
-  auto dirichletValues = [](auto x)
+  auto dirichletValues1 = [](auto x)
   { return (x[0]< 1e-8 || x[1] < 1e-8) ? 0 : 0.5; };
-  Functions::interpolate(basis, b, dirichletValues);
+  Dune::Functions::interpolate(basis, b1, dirichletValues1);
   // init solution vector
   Vector x1(basis.size());
   x1 = b1;
   // init linear operator
-  MatrixAdapter<Matrix,Vector,Vector> linearOperator(stiffnessMatrix);
+  Dune::MatrixAdapter<Matrix,Vector,Vector> linearOperator(stiffnessMatrix1);
   // init ILU
-  SeqILU<Matrix,Vector,Vector> preconditioner(stiffnessMatrix, 1.0);
+  Dune::SeqILU<Matrix,Vector,Vector> preconditioner(stiffnessMatrix1, 1.0);
   // init conjugate gradient solver
-  CGSolver<Vector> cg(linearOperator, preconditioner,
+  Dune::CGSolver<Vector> cg1(linearOperator, preconditioner,
                       1e-5, // Desired residual reduction factor
                       50,   // Maximum number of iterations
                       2);   // Verbosity of the solver
   // init solving statistics object
-  InverseOperatorResult statistics1;
+  Dune::InverseOperatorResult statistics1;
+  //-----------------------------------------------------------------------
+  // end init FEM 1
   // init FEM 2
+  //-----------------------------------------------------------------------
   // FEM 2
   // TODO
   //-----------------------------------------------------------------------
+  //=======================================================================
   // end Init
   
   // Perform GC
-  TIME(Topology topology = Topology(gv, BOTH));
-  TIME(Colors clrs = gc_greedy(grid));
-  // TODO TIME(Colors clrs = gc_???(grid))
+  TIME(Topology topology = Topology(BOTH, basis));
+  TIME(Colors clrs1 = gc_greedy(grid));
+  // TODO TIME(Colors clrs2 = gc_???(grid))
 
   // Perform common FEM evaluation
-  TIME(cg1.solve(x1, b1, statistics1))
-  // TIME(cg2.solce(x2, b2, statistics2))
+  TIME(cg1.apply(x1, b1, statistics1))
+  // TIME(cg2.apply(x2, b2, statistics2))
 
   // Perform parallel colored FEM evaluation
-  TIME(cg1.solve(x1, b1, statistics1, clrs))
-  // TIME(cg2.solve(x2, b2, statistics2, clrs))
+  TIME(cg1.apply(x1, b1, statistics1, clrs1))
+  // TIME(cg2.apply(x2, b2, statistics2, clrs2))
 
   return 0;
 }
